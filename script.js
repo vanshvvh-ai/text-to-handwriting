@@ -142,15 +142,59 @@ function paginate(){
   const {w:W,h:H}=DIMS[S.pageSize];
   const startX=S.margin!=='none'?100:42,maxX=W-35;
   const startY=S.heading?132:100,maxY=H-50;
+  const maxLinesPerPage=Math.floor((maxY-startY)/S.lineSpacing);
+
   const text=manualPages[currentMP]?.text||'';
   const rawLines=text.split('\n');
-  const allVL=[];rawLines.forEach((line,lIdx)=>wrapLine(line,startX,maxX,lIdx).forEach(vl=>allVL.push(vl)));
-  const pages=[[]];let pi=0,usedY=startY;
-  allVL.forEach(vl=>{if(usedY+S.lineSpacing>maxY){pages.push([]);pi++;usedY=startY;}pages[pi].push(vl);usedY+=S.lineSpacing;});
-  S.renderedPages=pages;
-  if(S.currentRP>=pages.length)S.currentRP=0;
+
+  // Build all visual lines with wrap
+  const allVL=[];
+  rawLines.forEach((line,lIdx)=>wrapLine(line,startX,maxX,lIdx).forEach(vl=>allVL.push(vl)));
+
+  // If all visual lines fit on one rendered page — simple case, no overflow
+  if(allVL.length<=maxLinesPerPage){
+    S.renderedPages=[allVL];
+    S.currentRP=0;
+  } else {
+    // Only take first page worth of lines for this manual page
+    // Overflow lines get converted back to text and pushed to next manual page
+    const thisPageLines=allVL.slice(0,maxLinesPerPage);
+    S.renderedPages=[thisPageLines];
+    S.currentRP=0;
+
+    // Figure out which raw line index the overflow starts at
+    const lastVL=thisPageLines[thisPageLines.length-1];
+    const overflowLIdx=lastVL?lastVL.lIdx+1:0;
+    const overflowText=rawLines.slice(overflowLIdx).join('\n');
+
+    if(overflowText.trim()){
+      // Check if a next manual page exists
+      if(currentMP+1>=manualPages.length){
+        // Auto-create next page for overflow
+        manualPages.push({
+          label:`Page ${manualPages.length+1}`,
+          text: overflowText
+        });
+        renderPageUI();
+      } else {
+        // Prepend overflow to existing next page
+        // Only if next page doesn't already start with this overflow (avoid duplication)
+        const nextText=manualPages[currentMP+1].text||'';
+        if(!nextText.startsWith(overflowText.slice(0,30))){
+          manualPages[currentMP+1].text=overflowText+
+            (nextText?'\n'+nextText:'');
+          // Update textarea if next page is currently active
+          if(currentMP+1===currentMP){
+            document.getElementById('userText').value=manualPages[currentMP+1].text;
+          }
+        }
+      }
+    }
+  }
+
   const wc=text.split(/\s+/).filter(Boolean).length;
-  document.getElementById('pageInfo').innerHTML=`Manual pages: ${manualPages.length}<br>Rendered: ${pages.length}<br>Words: ${wc}<br>Lines: ${rawLines.length}`;
+  document.getElementById('pageInfo').innerHTML=
+    `Manual pages: ${manualPages.length}<br>Rendered: ${S.renderedPages.length}<br>Words: ${wc}<br>Lines: ${rawLines.length}`;
   updateCounters();render();
 }
 
@@ -393,34 +437,33 @@ document.getElementById('zoomOut').onclick=()=>setZoom(zoom-0.1);
 //  antivirus false-positives from streaming blobs
 // ══════════════════════════════════════════
 function renderPageToDataURL(mpIdx, rpIdx) {
-  // Save current state
-  const origMP=currentMP, origRP=S.currentRP;
-  const origText=manualPages[currentMP].text;
-
-  // Switch to target page
-  if(mpIdx!==currentMP){
-    currentMP=mpIdx;
-    document.getElementById('userText').value=manualPages[currentMP].text;
-    paginate(); // rebuilds S.renderedPages
+  const origMP = currentMP, origRP = S.currentRP;
+  const origText = manualPages[currentMP].text;
+  if(mpIdx !== currentMP){
+    currentMP = mpIdx;
+    document.getElementById('userText').value = manualPages[currentMP].text;
+    paginate();
   }
-  S.currentRP=rpIdx;
+  S.currentRP = rpIdx;
   render();
 
-  // Draw to offscreen canvas at quality scale
-  const q=S.quality,{w:W,h:H}=DIMS[S.pageSize];
-  const ec=document.createElement('canvas');
-  ec.width=W*q;ec.height=H*q;
-  const ec2=ec.getContext('2d');
-  ec2.imageSmoothingEnabled=true;ec2.imageSmoothingQuality='high';
-  ec2.drawImage(canvas,0,0,W*q,H*q);
-  const dataURL=ec.toDataURL('image/png');
+  // Fix: explicitly use full page dimensions, not canvas.width/height
+  const q = Math.max(S.quality, 1.5);
+  const { w:W, h:H } = DIMS[S.pageSize];
+  const ec = document.createElement('canvas');
+  ec.width  = W * q;
+  ec.height = H * q;
+  const ec2 = ec.getContext('2d');
+  ec2.imageSmoothingEnabled = true;
+  ec2.imageSmoothingQuality = 'high';
+  // Draw full canvas dimensions explicitly
+  ec2.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, W*q, H*q);
+  const dataURL = ec.toDataURL('image/png');
 
-  // Restore
-  currentMP=origMP;
-  document.getElementById('userText').value=origText;
-  S.currentRP=origRP;
+  currentMP = origMP;
+  document.getElementById('userText').value = origText;
+  S.currentRP = origRP;
   paginate();
-
   return dataURL;
 }
 
@@ -476,7 +519,11 @@ async function doZip(){
       S.currentRP=ri;render();
       const q=S.quality,{w:W,h:H}=DIMS[S.pageSize];
       const ec=document.createElement('canvas');ec.width=W*q;ec.height=H*q;
-      const ec2=ec.getContext('2d');ec2.drawImage(canvas,0,0,W*q,H*q);
+      const ec2=ec.getContext('2d');
+      ec2.imageSmoothingEnabled=true;ec2.imageSmoothingQuality='high';
+      ec2.drawImage(canvas,0,0,canvas.width,canvas.height,0,0,W*q,H*q);
+    //   const ec=document.createElement('canvas');ec.width=W*q;ec.height=H*q;
+    //   const ec2=ec.getContext('2d');ec2.drawImage(canvas,0,0,W*q,H*q);
       const dataURL=ec.toDataURL('image/png');
       const lbl=(manualPages[mi].label||`Page${mi+1}`).replace(/\s+/g,'_');
       const num=String(files.length+1).padStart(2,'0');
@@ -540,4 +587,384 @@ window.onload=()=>{
     });
   });
   setTimeout(()=>{if(document.getElementById('statusTxt').textContent!=='Ready'){document.getElementById('statusTxt').textContent='Ready';paginate();}},2800);
+};
+
+// ══════════════════════════════════════════
+//  OFFSCREEN DRAW HELPERS FOR PDF EXPORT
+//  Draw to any ctx — completely independent
+//  of the main canvas and its zoom state
+// ══════════════════════════════════════════
+function drawPaperToCtx(c, W, H) {
+  c.globalAlpha = 1; c.shadowBlur = 0;
+  const p = S.paper;
+  if (p === 'aged') {
+    const g = c.createLinearGradient(0,0,W,H);
+    g.addColorStop(0,'#f6e9b4'); g.addColorStop(1,'#e8d680');
+    c.fillStyle = g; c.fillRect(0,0,W,H);
+    c.strokeStyle = '#c5a85870'; c.lineWidth = 1;
+    for (let y=100; y<H; y+=S.lineSpacing) { c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); }
+  } else if (p === 'white') {
+    c.fillStyle = '#ffffff'; c.fillRect(0,0,W,H);
+  } else if (p === 'grid') {
+    c.fillStyle = '#fdfeff'; c.fillRect(0,0,W,H);
+    c.strokeStyle = '#d5eaf8'; c.lineWidth = 0.7;
+    for (let x=0; x<W; x+=28) { c.beginPath(); c.moveTo(x,0); c.lineTo(x,H); c.stroke(); }
+    for (let y=0; y<H; y+=28) { c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); }
+    c.strokeStyle = '#aacce0'; c.lineWidth = 1;
+    for (let x=0; x<W; x+=140) { c.beginPath(); c.moveTo(x,0); c.lineTo(x,H); c.stroke(); }
+    for (let y=0; y<H; y+=140) { c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); }
+  } else if (p === 'legal') {
+    c.fillStyle = '#fefeed'; c.fillRect(0,0,W,H);
+    c.strokeStyle = '#d0d08880'; c.lineWidth = 1;
+    for (let y=80; y<H; y+=S.lineSpacing) { c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); }
+    c.strokeStyle = '#c05050'; c.lineWidth = 1.2;
+    [82,92].forEach(mx => { c.beginPath(); c.moveTo(mx,0); c.lineTo(mx,H); c.stroke(); });
+  } else if (p === 'rough') {
+    c.fillStyle = '#f8f6f0'; c.fillRect(0,0,W,H);
+    c.strokeStyle = '#dddac0'; c.lineWidth = 0.6;
+    for (let y=0; y<H; y+=22) { c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); }
+    for (let x=0; x<W; x+=22) { c.beginPath(); c.moveTo(x,0); c.lineTo(x,H); c.stroke(); }
+  } else {
+    c.fillStyle = '#fefcf9'; c.fillRect(0,0,W,H);
+    c.strokeStyle = '#ccd3e0'; c.lineWidth = 1;
+    for (let y=100; y<H; y+=S.lineSpacing) { c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); }
+  }
+  if (S.margin === 'single' && p !== 'legal' && p !== 'grid') {
+    c.strokeStyle = '#cc5555'; c.lineWidth = 1.2;
+    c.beginPath(); c.moveTo(82,0); c.lineTo(82,H); c.stroke();
+  } else if (S.margin === 'double') {
+    c.strokeStyle = '#cc5555'; c.lineWidth = 1.2;
+    [72,84].forEach(mx => { c.beginPath(); c.moveTo(mx,0); c.lineTo(mx,H); c.stroke(); });
+  }
+  if (S.effGrain) {
+    for (let i=0; i<3500; i++) {
+      c.globalAlpha = sr(i*9+3)*0.022;
+      c.fillStyle = '#000';
+      c.fillRect(sr(i*9+1)*W, sr(i*9+2)*H, 1, 1);
+    }
+    c.globalAlpha = 1;
+  }
+}
+
+function drawPageTextToCtx(c, W, H, pageData, mpIdx, rpIdx) {
+  c.globalAlpha = 1;
+  const startX = S.margin !== 'none' ? 100 : 42;
+  let y = S.heading ? 132 : 100;
+
+  // Heading + stamp
+  if (S.heading || S.stamp) {
+    c.save();
+    c.font = `italic ${S.fontSize+3}px '${S.font}', cursive`;
+    c.fillStyle = S.ink; c.globalAlpha = 0.87;
+    if (S.heading) c.fillText(S.heading, startX, 66);
+    if (S.stamp) {
+      c.font = `${S.fontSize-3}px '${S.font}', cursive`;
+      const sw = c.measureText(S.stamp).width;
+      c.fillText(S.stamp, W-sw-28, 66);
+    }
+    c.strokeStyle = S.ink; c.lineWidth = 0.8; c.globalAlpha = 0.3;
+    c.beginPath(); c.moveTo(startX,76); c.lineTo(W-28,76); c.stroke();
+    c.restore();
+  }
+
+  const errStyles = [...S.errorStyles];
+  const corrInk = shadeInk(S.ink, S.correctionShade);
+  const COMMON = new Set(['the','and','or','in','to','of','a','is','for','on',
+    'with','at','by','this','it','be','are','was','has','have','an','as','from','not','that']);
+
+  pageData.forEach((vl, vlIdx) => {
+    c.font = `${S.fontSize}px '${S.font}', cursive`;
+    const spW = c.measureText(' ').width;
+    const drift = S.wobble > 0 ? (sr(vlIdx*71 + rpIdx*317) - 0.5) * S.wobble : 0;
+    let x = startX + vl.indent;
+
+    vl.words.forEach(({word, wIdx}) => {
+      if (!word) { x += spW; return; }
+      c.font = `${S.fontSize}px '${S.font}', cursive`;
+      const seed = (mpIdx+1)*1001 + (rpIdx+1)*91 + (vl.lIdx+1)*37 + (wIdx+1)*17;
+      const wKey = `${mpIdx}:${rpIdx}:${vl.lIdx}:${wIdx}`;
+      const me = manualErrors.get(wKey);
+      const autoErr = !me && errStyles.length > 0 && sr(seed) < (S.errorRate/100)
+        && word.length > 3 && !COMMON.has(word.toLowerCase());
+      const isErr = !!me || autoErr;
+      const wordW = c.measureText(word).width;
+
+      if (isErr) {
+        const typo = makeTypo(word, seed);
+        const typoW = c.measureText(typo).width;
+        const style = me ? me.style : errStyles[Math.floor(sr(seed+99)*errStyles.length)];
+
+        // Draw typo dim
+        c.fillStyle = S.ink; c.globalAlpha = 0.48;
+        let cx2 = x;
+        for (const ch of typo) {
+          const chW = c.measureText(ch).width + S.letterSpacing*0.3;
+          const rot = (S.slant/180)*Math.PI + (S.effJitter?(sr(cx2*0.1+seed)-0.5)*0.03:0);
+          c.save(); c.translate(cx2, y+drift); c.rotate(rot); c.fillText(ch,0,0); c.restore();
+          cx2 += chW;
+        }
+
+        // Crossout on typo
+        c.save(); c.strokeStyle = corrInk;
+        const midY = y+drift - S.fontSize*0.33;
+        if (style === 'scribble') {
+          const passes = 2+Math.floor(sr(seed+77)*2);
+          for (let pass=0; pass<passes; pass++) {
+            c.globalAlpha = 0.65+sr(seed+pass*33)*0.2;
+            c.lineWidth = 1.3+sr(seed+pass)*0.8;
+            c.beginPath(); let ccx=x-3; c.moveTo(ccx, midY+(sr(seed+pass*11)-0.5)*5);
+            while(ccx<x+typoW+3){c.lineTo(ccx,midY+(sr(ccx*0.25+seed+pass*44)-0.5)*(S.fontSize*0.75));ccx+=2+sr(ccx*0.4+seed+pass*88)*4;}
+            c.stroke();
+          }
+        } else if (style === 'strikethrough') {
+          c.globalAlpha=0.82; c.lineWidth=1.7+sr(seed)*0.5;
+          c.beginPath(); c.moveTo(x-2,midY);
+          for(let i=1;i<=6;i++) c.lineTo(x-2+(typoW+4)*(i/6),midY+(sr(seed+i*13)-0.5)*2.5);
+          c.stroke();
+        } else if (style === 'overX') {
+          c.globalAlpha=0.75; c.lineWidth=1.6;
+          const tY=y+drift-S.fontSize*0.82, bY=y+drift+S.fontSize*0.08;
+          c.beginPath();c.moveTo(x-2,tY);c.lineTo(x+typoW+2,bY);c.stroke();
+          c.beginPath();c.moveTo(x+typoW+2,tY);c.lineTo(x-2,bY);c.stroke();
+        } else if (style === 'waveline') {
+          c.globalAlpha=0.75; c.lineWidth=1.4;
+          c.beginPath(); let wvx=x-2; c.moveTo(wvx,midY);
+          while(wvx<x+typoW+2){const nx=Math.min(wvx+7,x+typoW+2);c.quadraticCurveTo(wvx+3.5,midY+(sr(wvx*0.5+seed)-0.5)*9,nx,midY+(sr(wvx*0.5+seed+50)-0.5)*4);wvx=nx;}
+          c.stroke();
+        } else if (style === 'bracket') {
+          c.globalAlpha=0.72; c.lineWidth=1.5;
+          const tY=y+drift-S.fontSize*0.82,bY=y+drift+S.fontSize*0.08;
+          c.beginPath();c.moveTo(x+3,tY);c.lineTo(x-4,tY);c.lineTo(x-4,bY);c.lineTo(x+3,bY);c.stroke();
+          c.beginPath();c.moveTo(x+typoW-3,tY);c.lineTo(x+typoW+4,tY);c.lineTo(x+typoW+4,bY);c.lineTo(x+typoW-3,bY);c.stroke();
+        }
+        c.restore();
+
+        // Correct word after gap
+        c.fillStyle = corrInk; c.globalAlpha = 1;
+        let rwx = x + typoW + S.rewriteGap;
+        for (const ch of word) {
+          const chW = c.measureText(ch).width + S.letterSpacing*0.3;
+          const rot = (S.slant/180)*Math.PI + (S.effJitter?(sr(seed+ch.charCodeAt(0))-0.5)*0.03:0);
+          const jit = S.effJitter ? (sr(seed+ch.charCodeAt(0)+10)-0.5)*1.3 : 0;
+          c.save(); c.translate(rwx, y+drift+jit); c.rotate(rot); c.fillText(ch,0,0); c.restore();
+          rwx += chW;
+        }
+        x = rwx + spW;
+
+      } else {
+        // Normal word render
+        c.fillStyle = S.ink;
+        let cx = x;
+        for (let ci=0; ci<word.length; ci++) {
+          const ch = word[ci];
+          const cseed = seed*500+ci+1;
+          const chW = c.measureText(ch).width + S.letterSpacing*0.3;
+          const alpha = S.effPressure ? 0.76+sr(cseed)*0.24 : 0.92;
+          const rot = (S.slant/180)*Math.PI + (S.effJitter?(sr(cseed+5)-0.5)*0.03:0);
+          const jit = S.effJitter ? (sr(cseed+10)-0.5)*1.3 : 0;
+          c.globalAlpha = Math.min(1, alpha);
+          c.save(); c.translate(cx, y+drift+jit); c.rotate(rot); c.fillText(ch,0,0); c.restore();
+          cx += chW;
+        }
+        c.globalAlpha = 1; c.shadowBlur = 0;
+        x += wordW + spW + S.letterSpacing*0.3;
+      }
+    });
+    y += S.lineSpacing;
+  });
+}
+
+// ══════════════════════════════════════════
+//  PDF EXPORT
+//  Renders every manual page + their sub-pages
+//  into a single multi-page PDF using jsPDF
+// ══════════════════════════════════════════
+// document.getElementById('dlPDF').onclick = () => {
+//   document.getElementById('statusTxt').textContent = 'Building PDF…';
+
+//   // Small timeout so status text updates before heavy work starts
+//   setTimeout(async () => {
+//     try {
+//       // jsPDF attaches to window as window.jspdf.jsPDF
+//       const { jsPDF } = window.jspdf;
+
+//       // Match PDF page size to user's chosen page size
+//       const sizeMap = { a4:'a4', letter:'letter', a5:'a5' };
+//       const orientation = 'portrait';
+//       const unit = 'px';
+//       const chosenSize = sizeMap[S.pageSize] || 'a4';
+
+//       const { w: W, h: H } = DIMS[S.pageSize];
+
+//       // Create PDF — first page added automatically
+//       const pdf = new jsPDF({ orientation, unit, format: chosenSize });
+
+//       // Save current state so we can restore after
+//       const origMP = currentMP;
+//       const origRP = S.currentRP;
+//       manualPages[currentMP].text = document.getElementById('userText').value;
+
+//       let totalPages = 0;
+//       let firstPage = true;
+
+//       for (let mi = 0; mi < manualPages.length; mi++) {
+//         // Switch to this manual page
+//         currentMP = mi;
+//         document.getElementById('userText').value = manualPages[mi].text;
+//         paginate(); // rebuilds S.renderedPages for this manual page
+
+//         const rCount = S.renderedPages.length;
+
+//         for (let ri = 0; ri < rCount; ri++) {
+//           S.currentRP = ri;
+//           render(); // draws to main canvas
+
+//           // Draw canvas to an offscreen canvas at 1.5x quality
+//           const q = Math.max(S.quality, 1.5);
+//           const ec = document.createElement('canvas');
+//           ec.width = W * q;
+//           ec.height = H * q;
+//           const ec2 = ec.getContext('2d');
+//           ec2.imageSmoothingEnabled = true;
+//           ec2.imageSmoothingQuality = 'high';
+//           ec2.drawImage(canvas, 0, 0, canvas.width, canvas.height, 0, 0, W*q, H*q);
+
+//           const imgData = ec.toDataURL('image/jpeg', 0.92);
+//           // JPEG used instead of PNG — smaller file, faster PDF, no quality loss visible
+
+//           if (firstPage) {
+//             // jsPDF creates first page automatically — just add image to it
+//             pdf.addImage(imgData, 'JPEG', 0, 0, W, H);
+//             firstPage = false;
+//           } else {
+//             pdf.addPage(chosenSize, orientation);
+//             pdf.addImage(imgData, 'JPEG', 0, 0, W, H);
+//           }
+
+//           totalPages++;
+//           document.getElementById('statusTxt').textContent =
+//             `Adding page ${totalPages}…`;
+//         }
+//       }
+
+//       // Restore original state
+//       currentMP = origMP;
+//       document.getElementById('userText').value = manualPages[origMP].text;
+//       S.currentRP = origRP;
+//       paginate();
+
+//       // Save the PDF
+//       const filename = (manualPages[0]?.label || 'assignment')
+//         .replace(/\s+/g, '_')
+//         .toLowerCase();
+//       pdf.save(`${filename}.pdf`);
+
+//       document.getElementById('statusTxt').textContent =
+//         `PDF exported — ${totalPages} pages!`;
+//       setTimeout(
+//         () => (document.getElementById('statusTxt').textContent = 'Ready'),
+//         3000
+//       );
+
+//     } catch (err) {
+//       console.error('PDF export error:', err);
+//       document.getElementById('statusTxt').textContent = 'PDF failed — check console';
+//       setTimeout(
+//         () => (document.getElementById('statusTxt').textContent = 'Ready'),
+//         3000
+//       );
+//     }
+//   }, 80);
+// };
+
+document.getElementById('dlPDF').onclick = () => {
+  document.getElementById('statusTxt').textContent = 'Building PDF…';
+
+  setTimeout(async () => {
+    try {
+      const { jsPDF } = window.jspdf;
+      const sizeMap = { a4:'a4', letter:'letter', a5:'a5' };
+      const { w:W, h:H } = DIMS[S.pageSize];
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'px',
+        format: [W, H]
+      });
+
+      // Save state
+      const origMP = currentMP;
+      const origRP = S.currentRP;
+      manualPages[currentMP].text = document.getElementById('userText').value;
+
+      let totalPages = 0;
+      let firstPage = true;
+
+      for (let mi = 0; mi < manualPages.length; mi++) {
+        currentMP = mi;
+        document.getElementById('userText').value = manualPages[mi].text;
+
+        // Rebuild rendered pages for this manual page
+        // without calling full paginate() which triggers render() on main canvas
+        const startX = S.margin !== 'none' ? 100 : 42;
+        const maxX = W - 35;
+        const startY = S.heading ? 132 : 100;
+        const maxY = H - 50;
+        const rawLines = (manualPages[mi].text || '').split('\n');
+        const allVL = [];
+        rawLines.forEach((line, lIdx) =>
+          wrapLine(line, startX, maxX, lIdx).forEach(vl => allVL.push(vl))
+        );
+        const pages = [[]]; let pi = 0, usedY = startY;
+        allVL.forEach(vl => {
+          if (usedY + S.lineSpacing > maxY) { pages.push([]); pi++; usedY = startY; }
+          pages[pi].push(vl); usedY += S.lineSpacing;
+        });
+
+        for (let ri = 0; ri < pages.length; ri++) {
+          // Create a fresh offscreen canvas — completely separate from main canvas
+          const offCanvas = document.createElement('canvas');
+          offCanvas.width  = W;
+          offCanvas.height = H;
+          const offCtx = offCanvas.getContext('2d');
+
+          // Draw paper onto offscreen canvas
+          drawPaperToCtx(offCtx, W, H);
+
+          // Draw text onto offscreen canvas
+          drawPageTextToCtx(offCtx, W, H, pages[ri], mi, ri);
+
+          const imgData = offCanvas.toDataURL('image/jpeg', 0.93);
+
+          if (firstPage) {
+            pdf.addImage(imgData, 'JPEG', 0, 0, W, H);
+            firstPage = false;
+          } else {
+            pdf.addPage([W, H], 'portrait');
+            pdf.addImage(imgData, 'JPEG', 0, 0, W, H);
+          }
+
+          totalPages++;
+          document.getElementById('statusTxt').textContent = `Page ${totalPages}…`;
+        }
+      }
+
+      // Restore
+      currentMP = origMP;
+      document.getElementById('userText').value = manualPages[origMP].text;
+      S.currentRP = origRP;
+      paginate();
+
+      const filename = (manualPages[0]?.label || 'assignment')
+        .replace(/\s+/g, '_').toLowerCase();
+      pdf.save(`${filename}.pdf`);
+
+      document.getElementById('statusTxt').textContent = `PDF done — ${totalPages} pages!`;
+      setTimeout(() => document.getElementById('statusTxt').textContent = 'Ready', 3000);
+
+    } catch(err) {
+      console.error('PDF error:', err);
+      document.getElementById('statusTxt').textContent = 'PDF failed — check console';
+      setTimeout(() => document.getElementById('statusTxt').textContent = 'Ready', 3000);
+    }
+  }, 80);
 };
